@@ -21,6 +21,14 @@ const HARD_LEVEL = {
   distance: 5,
 };
 
+const SWEAT_DROPLET = {
+  x: 0,                 // Use percentages again, centered around slime x/y
+  y: 0,
+  dx: 0.001,            // Percentages relative to canvas size
+  dy: 0.002,
+  lifeMS: 202,          // When it reaches zero (or below zero), it gets deleted
+};
+
 const STATE = {
   score: 59,
   difficulty: 2,
@@ -29,19 +37,37 @@ const STATE = {
   animationTimeMS: 0,           // time spent in animation
   slime: {
     power: 0,
+    state: 'idle',              // can be one of idle, crouching, jumping
+    animationTimeMS: 0,
+    blinkTimeMS: 0,
+    sweat: [],
   }
 };
 
 // actual constants
 const MAX_SLIME_JUMP_MS = 500;         // snappy transitions make for better user experience
 const MAX_SLIME_TRANSITION_MS = 500;
+const MAX_SLIME_BLINK_MS = 100;
+const MAX_SLIME_SWEAT_MS = 500;
+const MAX_SLIME_SWEAT = 20;
+
 const POWER_PER_SECOND = 2;
+
+// Use percentages instead of pixels
+const SLIME_IDLE_X = 0.2;
+const SLIME_IDLE_Y = 0.5;
+const SWEAT_RADIUS_PX = 2;
+
+const SLIME_WIDTH_PX = 80;
+const SLIME_HEIGHT_PX = 64;
+const GRAVITY_ACCEL = 0.5;
 
 let input = {
   mousedown: false,
 };
 
 let debug = true;
+let spriteSheet = new Image();
 
 /**
  * Responsible for giving us the stats for the next jump, given the difficulty.
@@ -84,12 +110,43 @@ function drawUI(ctx, gameState) {
   ctx.fillText(`score: ${gameState.score}`, 0, 10);
 }
 
+function drawSlimeSweat(ctx, gameState) {
+  // Sweat slowly dissipates, not all at once, so we use square root to represent this on alpha
+  for (let {x, y, lifeMS} of gameState.slime.sweat) {
+    if (lifeMS <= 0) {
+      continue;
+    }
+
+    const alpha = Math.sqrt(lifeMS / MAX_SLIME_SWEAT_MS);
+    ctx.fillStyle = `rgba(87.3, 19.3, 19.3, ${alpha}`;
+    ctx.beginPath();
+    ctx.arc((SLIME_IDLE_X + x) * ctx.canvas.width + SLIME_WIDTH_PX / 2, (SLIME_IDLE_Y + y) * ctx.canvas.height - SLIME_HEIGHT_PX / 2, SWEAT_RADIUS_PX, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.closePath();
+  }
+}
+
 function drawSlimeIdle(ctx, gameState) {
-  ctx.font = '15px sans';
-  ctx.fillText('idle', 0, 0);
+  const animationTimeS = gameState.slime.animationTimeMS / 1000;
+  const heightModifierPX = 2 * Math.sin(animationTimeS * 4) + 2;
+  const height = SLIME_HEIGHT_PX + heightModifierPX;
+
+  // Blink every other 5 seconds
+  const allowedToBlink = animationTimeS > 5 && Math.floor(animationTimeS / 5) % 2 == 1;
+  const modulo5 = animationTimeS - Math.floor(animationTimeS / 5) * 5;      // like a normal modulo 5 group, but continuous
+  const isBlinking = allowedToBlink &&
+    (modulo5 <= MAX_SLIME_BLINK_MS / 1000 ||                                // blink immediately at 0
+      (modulo5 >= 0.5 && modulo5 <= 0.5 + MAX_SLIME_BLINK_MS / 1000));      // next blink half a second from last
+
+  const imgIndexX = isBlinking ? 1 : 0;
+  ctx.drawImage(spriteSheet, imgIndexX * SLIME_WIDTH_PX, 0, SLIME_WIDTH_PX, SLIME_HEIGHT_PX, SLIME_IDLE_X * ctx.canvas.width, SLIME_IDLE_Y * ctx.canvas.height - height, SLIME_WIDTH_PX, height);
 }
 
 function drawSlimeTryingToJump(ctx, gameState) {
+  drawSlimeSweat(ctx, gameState);
+
+  const height = SLIME_HEIGHT_PX;
+  ctx.drawImage(spriteSheet, SLIME_WIDTH_PX * 2, 0, SLIME_WIDTH_PX, SLIME_HEIGHT_PX, SLIME_IDLE_X * ctx.canvas.width, SLIME_IDLE_Y * ctx.canvas.height - height, SLIME_WIDTH_PX, height);
 }
 
 function drawSlimeJumping(ctx, gameState) {
@@ -124,21 +181,54 @@ function draw(ctx, gameState) {
   drawUI(ctx, gameState);
 }
 
+function newSweat(ctx) {
+  return {
+    x: 0,
+    y: 0,
+    dx: Math.random() * 0.5 - 0.25,
+    dy: -1 * (Math.random() * 0.1 + 0.3),
+    lifeMS: MAX_SLIME_SWEAT_MS,
+  };
+}
+
 /**
  * Update the game state
  */
 function update(elapsedTimeMS, gameState) {
   const { state } = gameState;
 
+  gameState.slime.animationTimeMS += elapsedTimeMS;
+
   if (state === 'slime_idle') {
     // Slime isn't doing a thing
     if (input.mousedown) {
       gameState.state = 'slime_trying_jump';
+      gameState.slime.state = 'crouching';
+      gameState.slime.animationTimeMS = 0;
     }
   } else if (state === 'slime_trying_jump') {
     // Slime is trying to jump (you are holding the mouse down)
+    const canAddMoreSweat = gameState.slime.animationTimeMS / 1000 >= gameState.slime.sweat.length && gameState.slime.sweat.length <= MAX_SLIME_SWEAT;
+    if (canAddMoreSweat) {
+      gameState.slime.sweat.push(newSweat());
+    }
+
+    gameState.slime.sweat = gameState.slime.sweat
+      .filter(sweat => sweat.lifeMS > 0)
+      .map(sweat => {
+        return {
+          x: sweat.x + sweat.dx * elapsedTimeMS / 1000,
+          y: sweat.y + sweat.dy * elapsedTimeMS / 1000,
+          dx: sweat.dx,
+          dy: sweat.dy + GRAVITY_ACCEL * elapsedTimeMS / 1000,
+          lifeMS: sweat.lifeMS - elapsedTimeMS,
+        };
+      });
+
     if (!input.mousedown) {
       gameState.state = 'slime_jumping';
+      gameState.slime.state = 'jumping';
+      gameState.slime.animationTimeMS = 0;
     } else {
       gameState.slime.power += POWER_PER_SECOND * elapsedTimeMS / 1000;
     }
@@ -148,7 +238,9 @@ function update(elapsedTimeMS, gameState) {
 
     if (gameState.animationTimeMS >= MAX_SLIME_JUMP_MS) {
       gameState.state = 'slime_transition';
+      gameState.slime.state = 'idle';
       gameState.animationTimeMS = 0;
+      gameState.slime.animationTimeMS = 0;
       gameState.slime.power = 0;
     }
   } else if (state === 'slime_transition') {
@@ -192,15 +284,26 @@ function init() {
     animationTimeMS: 0,
     slime: {
       power: 0,
+      state: 'idle',
+      animationTimeMS: 0,
+      blinkTimeMS: 0,
+      sweat: [],
     },
   };
 
-  requestAnimationFrame(timestamp => step({
-    previousTimestamp: 0,
-    timestamp,
-    ctx,
-    gameState,
-  }));
+  // Place source at back so .onload and .onerror gets triggered properly
+  spriteSheet.onload = () => {
+    requestAnimationFrame(timestamp => step({
+      previousTimestamp: 0,
+      timestamp,
+      ctx,
+      gameState,
+    }));
+  };
+  spriteSheet.onerror = () => {
+    console.error('could not load spritesheet');
+  };
+  spriteSheet.src = 'slime-bounce.png';
 }
 
 window.onload = init;

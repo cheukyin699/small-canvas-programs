@@ -46,12 +46,15 @@ const STATE = {
 
 // actual constants
 const MAX_SLIME_JUMP_MS = 500;         // snappy transitions make for better user experience
+const MAX_SLIME_JUMP_PX = 128;
 const MAX_SLIME_TRANSITION_MS = 500;
+const MAX_SLIME_REST_MS = MAX_SLIME_TRANSITION_MS * 0.3;
 const MAX_SLIME_BLINK_MS = 100;
 const MAX_SLIME_SWEAT_MS = 500;
 const MAX_SLIME_SWEAT = 20;
 
 const POWER_PER_SECOND = 2;
+const MAX_POWER = 4;
 
 // Use percentages instead of pixels
 const SLIME_IDLE_X = 0.2;
@@ -110,6 +113,25 @@ function drawUI(ctx, gameState) {
   ctx.fillText(`score: ${gameState.score}`, 0, 10);
 }
 
+function drawSlime(ctx, state, x, y, w, h) {
+  let offset = 0;
+  if (state === 'blink') {
+    offset = 1;
+  }
+  if (state === 'strained') {
+    offset = 2;
+  }
+
+  if (!w) {
+    w = SLIME_WIDTH_PX;
+  }
+  if (!h) {
+    h = SLIME_HEIGHT_PX;
+  }
+
+  ctx.drawImage(spriteSheet, offset * SLIME_WIDTH_PX, 0, SLIME_WIDTH_PX, SLIME_HEIGHT_PX, x, y, w, h);
+}
+
 function drawSlimeSweat(ctx, gameState) {
   // Sweat slowly dissipates, not all at once, so we use square root to represent this on alpha
   for (let {x, y, lifeMS} of gameState.slime.sweat) {
@@ -126,7 +148,7 @@ function drawSlimeSweat(ctx, gameState) {
   }
 }
 
-function drawSlimeIdle(ctx, gameState) {
+function drawSlimeIdleSomewhere(ctx, gameState, x, y) {
   const animationTimeS = gameState.slime.animationTimeMS / 1000;
   const heightModifierPX = 2 * Math.sin(animationTimeS * 4) + 2;
   const height = SLIME_HEIGHT_PX + heightModifierPX;
@@ -138,21 +160,92 @@ function drawSlimeIdle(ctx, gameState) {
     (modulo5 <= MAX_SLIME_BLINK_MS / 1000 ||                                // blink immediately at 0
       (modulo5 >= 0.5 && modulo5 <= 0.5 + MAX_SLIME_BLINK_MS / 1000));      // next blink half a second from last
 
-  const imgIndexX = isBlinking ? 1 : 0;
-  ctx.drawImage(spriteSheet, imgIndexX * SLIME_WIDTH_PX, 0, SLIME_WIDTH_PX, SLIME_HEIGHT_PX, SLIME_IDLE_X * ctx.canvas.width, SLIME_IDLE_Y * ctx.canvas.height - height, SLIME_WIDTH_PX, height);
+  drawSlime(ctx, isBlinking ? 'blink' : 'idle', x, y - height, SLIME_WIDTH_PX, height);
+}
+
+function drawSlimeIdle(ctx, gameState) {
+  const x = SLIME_IDLE_X * ctx.canvas.width;
+  const y = SLIME_IDLE_Y * ctx.canvas.height;
+  drawSlimeIdleSomewhere(ctx, gameState, x, y);
+}
+
+function drawSlimeJumpArc(ctx, gameState) {
+  ctx.save();
+
+  ctx.strokeStyle = `rgba(0.2, 0.2, 0.2, 0.7)`;
+  const initX = SLIME_IDLE_X * ctx.canvas.width + SLIME_WIDTH_PX / 2;
+  const initY = SLIME_IDLE_Y * ctx.canvas.height - SLIME_HEIGHT_PX / 2;
+  const deltaGoal = calculateMaxJumpDistance(gameState.slime.power);
+  ctx.beginPath();
+  ctx.moveTo(initX, initY);
+  ctx.bezierCurveTo(initX, initY - MAX_SLIME_JUMP_PX, initX + deltaGoal, initY - MAX_SLIME_JUMP_PX, initX + deltaGoal, initY);
+  ctx.stroke();
+  ctx.closePath();
+
+  ctx.restore();
 }
 
 function drawSlimeTryingToJump(ctx, gameState) {
-  drawSlimeSweat(ctx, gameState);
-
+  drawSlimeJumpArc(ctx, gameState);
   const height = SLIME_HEIGHT_PX;
-  ctx.drawImage(spriteSheet, SLIME_WIDTH_PX * 2, 0, SLIME_WIDTH_PX, SLIME_HEIGHT_PX, SLIME_IDLE_X * ctx.canvas.width, SLIME_IDLE_Y * ctx.canvas.height - height, SLIME_WIDTH_PX, height);
+  drawSlime(ctx, 'strained', SLIME_IDLE_X * ctx.canvas.width, SLIME_IDLE_Y * ctx.canvas.height - height);
+  drawSlimeSweat(ctx, gameState);
+}
+
+function clamp(x, lo, hi) {
+  if (x < lo) {
+    return lo;
+  } else if (x > hi) {
+    return hi;
+  } else {
+    return x;
+  }
+}
+
+function calculateMaxJumpDistance(power) {
+  return (-Math.cos(power * Math.PI / MAX_POWER) + 1) / 2 * SLIME_WIDTH_PX * MAX_POWER;
+}
+
+function calculateJumpXLocation(ctx, gameState) {
+  const animationProgress = clamp(gameState.slime.animationTimeMS / MAX_SLIME_JUMP_MS, 0, 1);
+  const deltaGoal = calculateMaxJumpDistance(gameState.slime.power);
+
+  // Linear horizontal speed
+  const dx = deltaGoal * animationProgress;
+  const x = dx + SLIME_IDLE_X * ctx.canvas.width;
+
+  return x;
+}
+
+function calculateJumpYLocation(ctx, gameState) {
+  const animationProgress = clamp(gameState.slime.animationTimeMS / MAX_SLIME_JUMP_MS, 0, 1);
+
+  // Parabolic vertical speed
+  const a = -4;
+  const b = 4;
+  const c = 0;
+  const dy = (a * Math.pow(animationProgress, 2) + b * animationProgress + c) * MAX_SLIME_JUMP_PX;
+  const y = -dy + SLIME_IDLE_Y * ctx.canvas.height;
+
+  return y;
 }
 
 function drawSlimeJumping(ctx, gameState) {
+  const x = calculateJumpXLocation(ctx, gameState);
+  const y = calculateJumpYLocation(ctx, gameState);
+  const width = SLIME_WIDTH_PX * 0.9;
+  const height = SLIME_HEIGHT_PX * 1.1;
+  drawSlime(ctx, 'blink', x, y - height, width, height);
 }
 
 function drawSlimeTransition(ctx, gameState) {
+  const resting = gameState.slime.animationTimeMS <= MAX_SLIME_REST_MS;
+
+  const animationProgress = resting ? 0 : (gameState.slime.animationTimeMS - MAX_SLIME_REST_MS) / (MAX_SLIME_TRANSITION_MS - MAX_SLIME_REST_MS);
+  const dxMax = calculateMaxJumpDistance(gameState.slime.power);
+  const x = SLIME_IDLE_X * ctx.canvas.width + dxMax * (1 - animationProgress);
+  const y = SLIME_IDLE_Y * ctx.canvas.height;
+  drawSlimeIdleSomewhere(ctx, gameState, x, y);
 }
 
 /**
@@ -241,7 +334,6 @@ function update(elapsedTimeMS, gameState) {
       gameState.slime.state = 'idle';
       gameState.animationTimeMS = 0;
       gameState.slime.animationTimeMS = 0;
-      gameState.slime.power = 0;
     }
   } else if (state === 'slime_transition') {
     // Slime is on the next platform and the level is transitioning back to slime_idle
@@ -249,6 +341,7 @@ function update(elapsedTimeMS, gameState) {
 
     if (gameState.animationTimeMS >= MAX_SLIME_TRANSITION_MS) {
       gameState.state = 'slime_idle';
+      gameState.slime.power = 0;
       gameState.animationTimeMS = 0;
       gameState.currentLvl = generateNextLevel(gameState.difficulty);
     }
